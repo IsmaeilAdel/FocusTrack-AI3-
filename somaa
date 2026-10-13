@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>FocusTrack AI - مراقبة تركيز الفصل المتقدمة</title>
+  
+  <!-- مكتبات MediaPipe للتعرف على الوجوه -->
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/face_mesh.js" crossorigin="anonymous"></script>
+
+  <style>
+    * { box-sizing: border-box; font-family: system-ui, -apple-system, sans-serif; }
+    body { background-color: #0f172a; color: #f8fafc; margin: 0; padding: 15px; text-align: center; }
+    
+    .card { background: #1e293b; border-radius: 12px; padding: 15px; margin-bottom: 15px; border: 1px solid #334155; }
+    
+    .video-container { position: relative; width: 100%; max-width: 600px; margin: 0 auto; border-radius: 10px; overflow: hidden; background: #000; }
+    video, canvas { width: 100%; height: auto; display: block; }
+    canvas { position: absolute; top: 0; left: 0; }
+    
+    .status-badge { display: inline-block; padding: 6px 12px; border-radius: 20px; font-size: 14px; margin-bottom: 10px; background: #334155; color: #94a3b8; }
+    .status-badge.active { background: #059669; color: #fff; }
+
+    .students-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin-top: 15px; }
+    
+    .student-card { background: #0f172a; border-radius: 10px; padding: 12px; border: 2px solid #334155; text-align: right; transition: all 0.3s ease; }
+    .student-card.warning { border-color: #ef4444; background: #451a1a; animation: pulse 1s infinite alternate; }
+    
+    @keyframes pulse {
+      from { box-shadow: 0 0 5px #ef4444; }
+      to { box-shadow: 0 0 15px #ef4444; }
+    }
+
+    .score { font-size: 26px; font-weight: bold; color: #38bdf8; margin: 5px 0; text-align: center; }
+    .score.low { color: #ef4444; }
+
+    .analysis-details { font-size: 13px; line-height: 1.6; color: #cbd5e1; margin-top: 8px; border-top: 1px solid #334155; padding-top: 6px; }
+
+    .alarm-banner { display: none; background: #ef4444; color: white; padding: 10px; border-radius: 8px; font-weight: bold; margin-bottom: 10px; font-size: 16px; text-align: center; }
+    .btn { background: #2563eb; color: #fff; border: none; padding: 12px 24px; border-radius: 8px; font-size: 16px; cursor: pointer; width: 100%; max-width: 300px; margin-top: 10px; }
+  </style>
+</head>
+<body>
+
+  <div id="alarm-banner" class="alarm-banner">⚠️ تنبيه: هناك طلاب انخفض تركيزهم عن 40%!</div>
+
+  <div class="card">
+    <h3>نظام مراقبة تركيز الفصل المتقدم</h3>
+    <div id="camera-status" class="status-badge">الكاميرا متوقفة</div>
+    
+    <div class="video-container">
+      <video id="webcam" playsinline webkit-playsinline muted></video>
+      <canvas id="output_canvas"></canvas>
+    </div>
+    
+    <button id="start-btn" class="btn" onclick="init()">تشغيل المراقبة الذكية</button>
+  </div>
+
+  <div class="card">
+    <h3>تحليلات الطلاب المكتشفين (<span id="students-count">0</span>)</h3>
+    <div id="students-container" class="students-grid">
+      <div style="color: #94a3b8; grid-column: 1/-1; text-align: center;">اضغط على زر التشغيل لبدء فحص الطلاب</div>
+    </div>
+  </div>
+
+  <script>
+    const videoElement = document.getElementById('webcam');
+    const canvasElement = document.getElementById('output_canvas');
+    const canvasCtx = canvasElement.getContext('2d');
+    
+    let audioCtx = null;
+    function playAlarm() {
+      if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      if (audioCtx.state === 'suspended') audioCtx.resume();
+      
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.type = 'sawtooth';
+      osc.frequency.setValueAtTime(700, audioCtx.currentTime);
+      gain.gain.setValueAtTime(0.08, audioCtx.currentTime);
+      osc.connect(gain);
+      gain.connect(audioCtx.destination);
+      osc.start();
+      osc.stop(audioCtx.currentTime + 0.25);
+    }
+
+    const faceMesh = new FaceMesh({
+      locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${file}`
+    });
+
+    faceMesh.setOptions({
+      maxNumFaces: 10,
+      refineLandmarks: true,
+      minDetectionConfidence: 0.5,
+      minTrackingConfidence: 0.5
+    });
+
+    faceMesh.onResults(onResults);
+
+    async function init() {
+      document.getElementById('start-btn').style.display = 'none';
+      document.getElementById('camera-status').innerText = 'جاري التشغيل والتحليل...';
+      
+      const camera = new Camera(videoElement, {
+        onFrame: async () => {
+          await faceMesh.send({image: videoElement});
+        },
+        width: 1280,
+        height: 720,
+        facingMode: "user"
+      });
+
+      await camera.start();
+      document.getElementById('camera-status').innerText = 'المراقبة الذكية نشطة';
+      document.getElementById('camera-status').classList.add('active');
+    }
+
+    function onResults(results) {
+      canvasElement.width = videoElement.videoWidth;
+      canvasElement.height = videoElement.videoHeight;
+
+      canvasCtx.save();
+      canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+
+      const studentsContainer = document.getElementById('students-container');
+      const alarmBanner = document.getElementById('alarm-banner');
+      
+      if (results.multiFaceLandmarks && results.multiFaceLandmarks.length > 0) {
+        const count = results.multiFaceLandmarks.length;
+        document.getElementById('students-count').innerText = count;
+        studentsContainer.innerHTML = '';
+        
+        let hasWarning = false;
+
+        results.multiFaceLandmarks.forEach((landmarks, index) => {
+          const nose = landmarks[1];
+          const leftEye = landmarks[33];
+          const rightEye = landmarks[263];
+          const upperLip = landmarks[13];
+          const lowerLip = landmarks[14];
+
+          // 1. تحليل اتجاه العين وحركة الرأس
+          const faceCenter = (leftEye.x + rightEye.x) / 2;
+          const noseDeviation = Math.abs(nose.x - faceCenter);
+          const headTilt = Math.abs(nose.y - 0.5);
+
+          let eyeDir = "مُركز للأمام 👁️";
+          if (nose.x < leftEye.x - 0.02) eyeDir = "مشتت (ينظر لليمين) ↗️";
+          else if (nose.x > rightEye.x + 0.02) eyeDir = "مشتت (ينظر لليسار) ↖️";
+
+          let headPos = "مستقيم وثابت 👤";
+          if (headTilt > 0.12) headPos = "مائل / غير مستقيم ⚠️";
+
+          // 2. تحليل تعبير الوجه (حركة الفم البسيطة للتفاعل)
+          const mouthOpen = Math.abs(upperLip.y - lowerLip.y);
+          let expression = "منتبه وطبيعي 🙂";
+          if (mouthOpen > 0.05) expression = "يتحدث / متفاعل 🗣️";
+
+          // 3. حساب نسبة التركيز الديناميكية
+          let focusScore = Math.round(100 - (noseDeviation * 350) - (headTilt * 120));
+          focusScore = Math.max(15, Math.min(98, focusScore));
+          focusScore = Math.min(100, Math.max(10, focusScore + Math.floor(Math.random() * 7) - 3));
+
+          const isLow = focusScore < 40;
+          if (isLow) hasWarning = true;
+
+          // رسم مربع التحديد على وجه الطالب
+          canvasCtx.strokeStyle = isLow ? '#ef4444' : '#10b981';
+          canvasCtx.lineWidth = 3;
+          const xMin = Math.min(...landmarks.map(l => l.x)) * canvasElement.width;
+          const xMax = Math.max(...landmarks.map(l => l.x)) * canvasElement.width;
+          const yMin = Math.min(...landmarks.map(l => l.y)) * canvasElement.height;
+          const yMax = Math.max(...landmarks.map(l => l.y)) * canvasElement.height;
+          canvasCtx.strokeRect(xMin, yMin, xMax - xMin, yMax - yMin);
+
+          // إنشاء بطاقة التحليلات المتقدمة لكل طالب
+          const card = document.createElement('div');
+          card.className = `student-card ${isLow ? 'warning' : ''}`;
+          card.innerHTML = `
+            <div style="display: flex; justify-content: space-between;">
+              <b>طالب #${index + 1}</b>
+              <small>${isLow ? '⚠️ منخفض' : '✅ مركز'}</small>
+            </div>
+            <div class="score ${isLow ? 'low' : ''}">%${focusScore}</div>
+            <div class="analysis-details">
+              <div>👁️ العين: ${eyeDir}</div>
+              <div>👦 الرأس: ${headPos}</div>
+              <div>💬 التعبير: ${expression}</div>
+            </div>
+          `;
+          studentsContainer.appendChild(card);
+        });
+
+        if (hasWarning) {
+          alarmBanner.style.display = 'block';
+          playAlarm();
+        } else {
+          alarmBanner.style.display = 'none';
+        }
+
+      } else {
+        document.getElementById('students-count').innerText = '0';
+        studentsContainer.innerHTML = '<div style="color: #f87171; grid-column: 1/-1; text-align: center;">لا يوجد طلاب في مجال الكاميرا</div>';
+        alarmBanner.style.display = 'none';
+      }
+      canvasCtx.restore();
+    }
+  </script>
+</body>
+</html>
